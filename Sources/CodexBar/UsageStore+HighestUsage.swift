@@ -38,7 +38,7 @@ extension UsageStore {
             let usedPercent = (primary.usedPercent + secondary.usedPercent) / 2
             return RateWindow(usedPercent: usedPercent, windowMinutes: nil, resetsAt: nil, resetDescription: nil)
         case .automatic:
-            if provider == .factory || provider == .kimi {
+            if provider == .factory {
                 return snapshot.secondary ?? snapshot.primary
             }
             if provider == .copilot,
