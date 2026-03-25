@@ -45,7 +45,7 @@ enum MenuBarMetricWindowResolver {
             if provider == .antigravity {
                 return snapshot.primary ?? snapshot.secondary ?? snapshot.tertiary
             }
-            if provider == .factory || provider == .kimi {
+            if provider == .factory {
                 return snapshot.secondary ?? snapshot.primary
             }
             if provider == .copilot,
