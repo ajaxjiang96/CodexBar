@@ -145,11 +145,35 @@ public struct UsageSnapshot: Codable, Sendable {
         return identity
     }
 
+    public func automaticPerplexityWindow() -> RateWindow? {
+        let fallbackWindows = self.orderedPerplexityFallbackWindows()
+        guard let primary = self.primary else {
+            return fallbackWindows.first
+        }
+        if primary.remainingPercent > 0 || fallbackWindows.isEmpty {
+            return primary
+        }
+        return fallbackWindows.first
+    }
+
+    public func orderedPerplexityDisplayWindows() -> [RateWindow] {
+        let fallbackWindows = self.orderedPerplexityFallbackWindows()
+        guard let primary = self.primary else {
+            return fallbackWindows
+        }
+        if primary.remainingPercent > 0 || fallbackWindows.isEmpty {
+            return [primary] + fallbackWindows
+        }
+        return fallbackWindows + [primary]
+    }
+
     public func switcherWeeklyWindow(for provider: UsageProvider, showUsed: Bool) -> RateWindow? {
         switch provider {
         case .factory:
             // Factory prefers secondary window
             return self.secondary ?? self.primary
+        case .perplexity:
+            return self.automaticPerplexityWindow()
         case .cursor:
             // Cursor: fall back to on-demand budget when the included plan is exhausted (only in
             // "show remaining" mode). The secondary/tertiary lanes are Total/Auto/API breakdowns,
@@ -205,6 +229,13 @@ public struct UsageSnapshot: Codable, Sendable {
         let scopedIdentity = identity.scoped(to: provider)
         if scopedIdentity.providerID == identity.providerID { return self }
         return self.withIdentity(scopedIdentity)
+    }
+
+    private func orderedPerplexityFallbackWindows() -> [RateWindow] {
+        let fallbackWindows = [self.tertiary, self.secondary].compactMap(\.self)
+        let usableFallback = fallbackWindows.filter { $0.remainingPercent > 0 }
+        let exhaustedFallback = fallbackWindows.filter { $0.remainingPercent <= 0 }
+        return usableFallback + exhaustedFallback
     }
 }
 
@@ -350,7 +381,8 @@ private final class CodexRPCClient: @unchecked Sendable {
 
     init(
         executable: String = "codex",
-        arguments: [String] = ["-s", "read-only", "-a", "untrusted", "app-server"]) throws
+        arguments: [String] = ["-s", "read-only", "-a", "untrusted", "app-server"],
+        environment: [String: String] = ProcessInfo.processInfo.environment) throws
     {
         var stdoutContinuation: AsyncStream<Data>.Continuation!
         self.stdoutLineStream = AsyncStream<Data> { continuation in
@@ -358,7 +390,7 @@ private final class CodexRPCClient: @unchecked Sendable {
         }
         self.stdoutLineContinuation = stdoutContinuation
 
-        let resolvedExec = BinaryLocator.resolveCodexBinary()
+        let resolvedExec = BinaryLocator.resolveCodexBinary(env: environment)
             ?? TTYCommandRunner.which(executable)
 
         guard let resolvedExec else {
@@ -366,7 +398,7 @@ private final class CodexRPCClient: @unchecked Sendable {
             throw RPCWireError.startFailed(
                 "Codex CLI not found. Install with `npm i -g @openai/codex` (or bun) then relaunch CodexBar.")
         }
-        var env = ProcessInfo.processInfo.environment
+        var env = environment
         env["PATH"] = PathBuilder.effectivePATH(
             purposes: [.rpc, .nodeTooling],
             env: env)
@@ -534,7 +566,7 @@ public struct UsageFetcher: Sendable {
     }
 
     private func loadRPCUsage() async throws -> UsageSnapshot {
-        let rpc = try CodexRPCClient()
+        let rpc = try CodexRPCClient(environment: self.environment)
         defer { rpc.shutdown() }
 
         try await rpc.initialize(clientName: "codexbar", clientVersion: "0.5.4")
@@ -568,7 +600,10 @@ public struct UsageFetcher: Sendable {
     }
 
     private func loadTTYUsage(keepCLISessionsAlive: Bool) async throws -> UsageSnapshot {
-        let status = try await CodexStatusProbe(keepCLISessionsAlive: keepCLISessionsAlive).fetch()
+        let status = try await CodexStatusProbe(
+            keepCLISessionsAlive: keepCLISessionsAlive,
+            environment: self.environment)
+            .fetch()
         guard let fiveLeft = status.fiveHourPercentLeft, let weekLeft = status.weeklyPercentLeft else {
             throw UsageError.noRateLimitsFound
         }
@@ -599,7 +634,7 @@ public struct UsageFetcher: Sendable {
     }
 
     private func loadRPCCredits() async throws -> CreditsSnapshot {
-        let rpc = try CodexRPCClient()
+        let rpc = try CodexRPCClient(environment: self.environment)
         defer { rpc.shutdown() }
         try await rpc.initialize(clientName: "codexbar", clientVersion: "0.5.4")
         let limits = try await rpc.fetchRateLimits().rateLimits
@@ -609,7 +644,10 @@ public struct UsageFetcher: Sendable {
     }
 
     private func loadTTYCredits(keepCLISessionsAlive: Bool) async throws -> CreditsSnapshot {
-        let status = try await CodexStatusProbe(keepCLISessionsAlive: keepCLISessionsAlive).fetch()
+        let status = try await CodexStatusProbe(
+            keepCLISessionsAlive: keepCLISessionsAlive,
+            environment: self.environment)
+            .fetch()
         guard let credits = status.credits else { throw UsageError.noRateLimitsFound }
         return CreditsSnapshot(remaining: credits, events: [], updatedAt: Date())
     }
@@ -632,7 +670,7 @@ public struct UsageFetcher: Sendable {
 
     public func debugRawRateLimits() async -> String {
         do {
-            let rpc = try CodexRPCClient()
+            let rpc = try CodexRPCClient(environment: self.environment)
             defer { rpc.shutdown() }
             try await rpc.initialize(clientName: "codexbar", clientVersion: "0.5.4")
             let limits = try await rpc.fetchRateLimits()
@@ -645,11 +683,9 @@ public struct UsageFetcher: Sendable {
 
     public func loadAccountInfo() -> AccountInfo {
         // Keep using auth.json for quick startup (non-blocking, no RPC spin-up required).
-        let authURL = URL(fileURLWithPath: self.environment["CODEX_HOME"] ?? "\(NSHomeDirectory())/.codex")
-            .appendingPathComponent("auth.json")
-        guard let data = try? Data(contentsOf: authURL),
-              let auth = try? JSONDecoder().decode(AuthFile.self, from: data),
-              let idToken = auth.tokens?.idToken
+        guard let credentials = try? CodexOAuthCredentialsStore.load(env: self.environment),
+              let idToken = credentials.idToken,
+              !idToken.isEmpty
         else {
             return AccountInfo(email: nil, plan: nil)
         }
@@ -703,10 +739,4 @@ public struct UsageFetcher: Sendable {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return json
     }
-}
-
-/// Minimal auth.json struct preserved from previous implementation
-private struct AuthFile: Decodable {
-    struct Tokens: Decodable { let idToken: String? }
-    let tokens: Tokens?
 }

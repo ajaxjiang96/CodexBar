@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.20.0 — 2026-03-30
+
+### Highlights
+- Add Perplexity provider with recurring, bonus, and purchased-credit tracking; plan detection (Pro/Max); and browser-cookie auto-import with manual-cookie fallback (#449). Thanks @BeelixGit!
+
+### Providers & Usage
+- Perplexity: add provider support with credit tracking for recurring (monthly), bonus (promotional), and purchased on-demand credits; plan detection (Pro/Max); and browser-cookie auto-import with manual-cookie fallback (#449). Thanks @BeelixGit!
 
 ## 0.19.0 — 2026-03-23
 ### Highlights
